@@ -57,17 +57,20 @@ def _kdf(ikm: bytes) -> bytes:
         crypto_generichash(outlen, message, key)
     The third argument 'salt' in the JS code is actually the BLAKE2b **key**.
     So: output_size=32, message=ikm+info, key=32_zero_bytes.
+
+    IMPORTANT: Must use crypto_generichash_blake2b (NOT _salt_personal).
+    The JS crypto_generichash does NOT use salt/personalization — the
+    _salt_personal variant mixes them into the hash state and produces
+    a completely different output even when they are all zeros.
     """
     info = b"PaperPhone-E2EE-v2"
     key = bytes(32)  # 32 zero bytes — used as BLAKE2b key
     message = _concat(ikm, info)
-    # crypto_generichash(message, digest_size, key)
-    return nacl.bindings.crypto_generichash_blake2b_salt_personal(
+    # Matches JS: na.crypto_generichash(32, concat(ikm, info), salt)
+    return nacl.bindings.crypto_generichash_blake2b(
         message,
         digest_size=32,
         key=key,
-        salt=bytes(16),       # BLAKE2b internal salt (zeroed)
-        person=bytes(16),   # BLAKE2b internal personal (zeroed)
     )
 
 
@@ -129,12 +132,9 @@ class PaperPhoneCrypto:
         # "Signature" = BLAKE2b(IK_priv || SPK_pub, digest=64, no key)
         # In JS: na.crypto_generichash(64, concat(ikPrivBytes, kp.publicKey))
         # No key argument = unkeyed BLAKE2b
-        sig = nacl.bindings.crypto_generichash_blake2b_salt_personal(
+        sig = nacl.bindings.crypto_generichash_blake2b(
             _concat(self.ik_private, spk_pub),
             digest_size=64,
-            key=b"",
-            salt=bytes(16),
-            person=bytes(16),
         )
 
         return b64encode(spk_pub), b64encode(spk_priv), b64encode(sig)
