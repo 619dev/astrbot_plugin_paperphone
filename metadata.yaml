@@ -1,0 +1,6 @@
+name: astrbot_plugin_paperphone
+display_name: PaperPhone 适配器
+desc: PaperPhone 平台适配器，使 AstrBot 能以普通用户身份接入 PaperPhone 端对端加密即时通讯。
+version: v1.0.0
+author: 619dev
+repo: https://github.com/619dev/astrbot_plugin_paperphone
