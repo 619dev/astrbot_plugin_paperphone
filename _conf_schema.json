@@ -1,0 +1,32 @@
+{
+  "server_url": {
+    "description": "PaperPhone 服务器地址",
+    "hint": "PaperPhone 服务端的完整 URL，例如 http://localhost:3000 或 https://paperphone.example.com",
+    "type": "string",
+    "default": "http://localhost:3000"
+  },
+  "username": {
+    "description": "Bot 用户名",
+    "hint": "用于登录 PaperPhone 的用户名，如果开启了自动注册且该用户名不存在，将自动创建账户",
+    "type": "string",
+    "default": ""
+  },
+  "password": {
+    "description": "Bot 密码",
+    "hint": "用于登录 PaperPhone 的密码",
+    "type": "string",
+    "default": ""
+  },
+  "auto_register": {
+    "description": "自动注册",
+    "hint": "开启后，若登录失败（用户不存在），将自动使用上述用户名和密码注册新账户",
+    "type": "bool",
+    "default": true
+  },
+  "bot_nickname": {
+    "description": "Bot 昵称",
+    "hint": "自动注册时使用的昵称，显示在 PaperPhone 中的名称",
+    "type": "string",
+    "default": "AstrBot"
+  }
+}
