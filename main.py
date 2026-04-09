@@ -5,7 +5,7 @@ from astrbot.api.star import Context, Star, register
     name="astrbot_plugin_paperphone",
     author="619dev",
     desc="PaperPhone 平台适配器插件，使 AstrBot 能以普通用户身份接入 PaperPhone 即时通讯。",
-    version="1.0.3",
+    version="1.0.4",
 )
 class PaperPhonePluginStar(Star):
     def __init__(self, context: Context):

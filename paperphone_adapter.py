@@ -85,6 +85,7 @@ class PaperPhoneAdapter(Platform):
         self._stop_event = asyncio.Event()
         self._crypto = PaperPhoneCrypto()
         self._ik_pub_cache: Dict[str, str] = {}  # user_id -> ik_pub (base64)
+        self._dm_notified_users: set = set()  # users already notified about DM limitation
 
         if not self.server_url:
             logger.error(
@@ -360,6 +361,31 @@ class PaperPhoneAdapter(Platform):
         msg_type = data.get("type")
 
         if msg_type == "message":
+            from_id = data.get("from")
+            group_id = data.get("group_id")
+
+            # ── Private messages: not supported (E2E encryption) ──
+            if not group_id and from_id and from_id != self._user_id:
+                logger.info(
+                    f"PaperPhoneAdapter: 收到私聊消息，跳过 "
+                    f"(from={str(from_id)[:8]}...)"
+                )
+                # Send a one-time notice to the sender
+                if from_id not in self._dm_notified_users:
+                    self._dm_notified_users.add(from_id)
+                    try:
+                        await self._send_private_message(
+                            from_id,
+                            "⚠️ Bot 无法处理端对端加密消息。\n"
+                            "请在群聊中与我交互，Bot 只能运行在不加密的群聊会话中。",
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"PaperPhoneAdapter: 发送私聊提示失败: {e}"
+                        )
+                return
+
+            # ── Group messages: process normally ──
             abm = await self.convert_message(data)
             if abm:
                 event = PaperPhoneEvent(
@@ -412,8 +438,8 @@ class PaperPhoneAdapter(Platform):
         """
         Convert a PaperPhone WebSocket message to an AstrBotMessage.
 
-        Handles decryption for private messages and plain-text extraction
-        for group messages.
+        Only handles group messages (unencrypted).
+        Private (E2E encrypted) messages are rejected upstream.
         """
         from_id = data.get("from")
         msg_id = data.get("id", "")
@@ -422,6 +448,10 @@ class PaperPhoneAdapter(Platform):
 
         # Skip messages from self
         if from_id == self._user_id:
+            return None
+
+        # Only process group messages
+        if not group_id:
             return None
 
         if not from_id:
@@ -445,57 +475,17 @@ class PaperPhoneAdapter(Platform):
         abm.nickname = from_nickname
         abm.sender = MessageMember(user_id=from_id, nickname=from_nickname)
 
-        # Decrypt/extract message content
+        # Extract message content (group messages are unencrypted)
         ciphertext = data.get("ciphertext", "")
-        header = data.get("header")
         plaintext = ""
 
         if msg_type in ("text", "bot_text"):
-            if header and ciphertext and not group_id:
-                # Private message — encrypted
-                try:
-                    if isinstance(header, str):
-                        header = json.loads(header)
-                    plaintext = self._crypto.decrypt(header, ciphertext)
-                except Exception as e:
-                    logger.error(
-                        f"PaperPhoneAdapter: 消息解密失败: {e}",
-                        exc_info=True,
-                    )
-                    plaintext = "[消息解密失败]"
-            elif group_id:
-                # Group message — ciphertext is actually plaintext for group msgs
-                # In PaperPhone, group messages also use E2E encryption per-member
-                # But in practice, the ciphertext field contains the text directly
-                # when the bot receives it via broadcast
-                if header and ciphertext:
-                    try:
-                        if isinstance(header, str):
-                            header = json.loads(header)
-                        plaintext = self._crypto.decrypt(header, ciphertext)
-                    except Exception:
-                        plaintext = ciphertext  # Fallback to raw
-                else:
-                    plaintext = ciphertext or ""
-            else:
-                plaintext = ciphertext or ""
-
+            plaintext = ciphertext or ""
             abm.message_str = plaintext
             abm.message.append(Plain(text=plaintext))
 
         elif msg_type == "image":
-            # Image messages — the ciphertext contains a URL or encrypted data
-            if header and ciphertext and not group_id:
-                try:
-                    if isinstance(header, str):
-                        header = json.loads(header)
-                    plaintext = self._crypto.decrypt(header, ciphertext)
-                except Exception as e:
-                    logger.error(f"PaperPhoneAdapter: 图片消息解密失败: {e}")
-                    plaintext = ""
-            else:
-                plaintext = ciphertext or ""
-
+            plaintext = ciphertext or ""
             abm.message_str = "[图片]"
             if plaintext.startswith("http"):
                 abm.message.append(Image(url=plaintext))
@@ -503,28 +493,14 @@ class PaperPhoneAdapter(Platform):
                 abm.message.append(Plain(text=f"[图片: {plaintext[:100]}]"))
 
         else:
-            # Other message types (file, video, voice, sticker, etc.)
-            if header and ciphertext:
-                try:
-                    if isinstance(header, str):
-                        header = json.loads(header)
-                    plaintext = self._crypto.decrypt(header, ciphertext)
-                except Exception:
-                    plaintext = f"[{msg_type}]"
-            else:
-                plaintext = f"[{msg_type}]"
-
+            plaintext = ciphertext or f"[{msg_type}]"
             abm.message_str = plaintext
             abm.message.append(Plain(text=plaintext))
 
-        # Set message type and session
-        if group_id:
-            abm.type = MessageType.GROUP_MESSAGE
-            abm.group_id = str(group_id)
-            abm.session_id = str(group_id)
-        else:
-            abm.type = MessageType.FRIEND_MESSAGE
-            abm.session_id = from_id
+        # Always group message
+        abm.type = MessageType.GROUP_MESSAGE
+        abm.group_id = str(group_id)
+        abm.session_id = str(group_id)
 
         if not abm.message:
             logger.debug(
@@ -569,13 +545,21 @@ class PaperPhoneAdapter(Platform):
         """
         Send a message back to PaperPhone through the WebSocket connection.
 
-        For private messages: encrypt with recipient's IK public key.
-        For group messages: encrypt for group broadcast.
+        Only supports group messages. Private messages are not supported
+        because the bot cannot handle E2E encryption reliably.
         """
         if self._ws is None or self._ws.closed:
             logger.error(
                 f"PaperPhoneAdapter '{self.metadata.id}': "
                 "WebSocket 未连接，无法发送消息。"
+            )
+            return
+
+        # Block private message replies from AstrBot
+        if session.message_type == MessageType.FRIEND_MESSAGE:
+            logger.warning(
+                f"PaperPhoneAdapter: Bot 不支持私聊回复 "
+                f"(session={session.session_id[:8]}...)，已跳过。"
             )
             return
 
@@ -617,9 +601,7 @@ class PaperPhoneAdapter(Platform):
             return
 
         try:
-            if session.message_type == MessageType.FRIEND_MESSAGE:
-                await self._send_private_message(session.session_id, plaintext)
-            elif session.message_type == MessageType.GROUP_MESSAGE:
+            if session.message_type == MessageType.GROUP_MESSAGE:
                 await self._send_group_message(session.session_id, plaintext)
             else:
                 logger.warning(
