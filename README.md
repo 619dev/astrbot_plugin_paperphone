@@ -1,14 +1,24 @@
 # AstrBot PaperPhone 适配器插件
 
-使 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 能以普通用户身份接入 [PaperPhone](https://github.com/619dev/PaperPhone) 端对端加密即时通讯平台。
+使 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 能以普通用户身份接入 [PaperPhone](https://github.com/619dev/PaperPhone) 即时通讯平台。
+
+> **⚠️ 重要限制：本插件仅支持群聊会话。**
+> PaperPhone 的私聊消息采用端对端加密（E2EE），Bot 无法可靠解密私聊消息内容。当用户发送私聊消息时，Bot 会自动回复提示，引导用户在群聊中交互。
 
 ## ✨ 功能
 
-- 🔐 **完整 E2E 加密支持** — 在 Python 端实现 PaperPhone 的加密协议（Curve25519 ECDH + XSalsa20-Poly1305），与 PaperPhone 客户端完全互操作
-- 💬 **私聊消息收发** — 加密/解密私聊消息
-- 👥 **群聊消息收发** — 支持群组消息
+- 👥 **群聊消息收发** — 接收和回复群组消息
 - 🔄 **自动重连** — WebSocket 断线自动重连
 - 📝 **自动注册** — 可选自动注册 Bot 账户
+- 🚫 **私聊自动提示** — 收到私聊消息时自动告知用户前往群聊交互
+
+## ⚠️ 关于私聊限制
+
+PaperPhone 的私聊消息采用逐消息的端对端加密协议（Curve25519 ECDH + XSalsa20-Poly1305）。Bot 每次启动时会重新生成加密密钥，而发送方可能使用了 Bot 旧的公钥进行加密，导致 Bot 无法解密已有的私聊消息。因此：
+
+- ❌ Bot **不处理**私聊消息
+- ✅ Bot **仅处理**群聊消息（群聊消息不加密）
+- 💬 收到私聊时，Bot 会发送一次性提示：*"Bot 无法处理端对端加密消息，请在群聊中与我交互"*
 
 ## 📦 安装
 
@@ -55,36 +65,21 @@ git clone https://github.com/619dev/astrbot_plugin_paperphone
 4. **启动 AstrBot**，插件会自动连接到 PaperPhone
 
 5. **在 PaperPhone 客户端中**：
-   - 搜索并添加 Bot 为好友
-   - 给 Bot 发消息即可开始对话
-
-## 🔒 安全说明
-
-- Bot 使用与普通 PaperPhone 用户完全相同的加密协议
-- 每次启动时会生成新的加密密钥并上传到服务器
-- 私钥仅存储在 AstrBot 运行时内存中
-- 所有私聊消息均经过端对端加密
+   - 将 Bot 添加到群聊中
+   - 在群聊中 @Bot 或发消息即可开始对话
 
 ## 🏗️ 技术架构
 
 ```
 PaperPhone 用户 ←→ PaperPhone Server ←→ [WebSocket] ←→ AstrBot Plugin ←→ AstrBot Core
                                               ↑
-                                     PyNaCl E2E 加密/解密
+                                     仅处理群聊消息（明文）
 ```
-
-### 加密协议
-
-本插件使用 PyNaCl（libsodium 的 Python 绑定）实现 PaperPhone 的无状态逐消息加密：
-
-1. **密钥交换**：Curve25519 ECDH
-2. **KDF**：BLAKE2b（`PaperPhone-E2EE-v2` info 标签）
-3. **对称加密**：XSalsa20-Poly1305
 
 ### 依赖
 
 - `aiohttp` — 异步 HTTP 和 WebSocket 客户端
-- `PyNaCl` — libsodium 加密库的 Python 绑定
+- `PyNaCl` — libsodium 加密库的 Python 绑定（用于登录密钥生成和私聊提示发送）
 
 ## 📄 许可
 
