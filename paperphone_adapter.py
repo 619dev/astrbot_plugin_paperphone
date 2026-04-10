@@ -326,7 +326,16 @@ class PaperPhoneAdapter(Platform):
 
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    await self._handle_ws_message(data)
+                    # Handle each message in its own try/except
+                    # so a processing error doesn't kill the WS connection
+                    try:
+                        await self._handle_ws_message(data)
+                    except Exception as e:
+                        logger.error(
+                            f"PaperPhoneAdapter '{self.metadata.id}': "
+                            f"处理消息时出错 (type={data.get('type')}): {e}",
+                            exc_info=True,
+                        )
                 elif msg.type == aiohttp.WSMsgType.CLOSED:
                     logger.warning(
                         f"PaperPhoneAdapter '{self.metadata.id}': "
@@ -366,6 +375,12 @@ class PaperPhoneAdapter(Platform):
             from_id = data.get("from")
             group_id = data.get("group_id")
 
+            logger.debug(
+                f"PaperPhoneAdapter: 收到消息 from={str(from_id)[:8] if from_id else '?'}... "
+                f"group={str(group_id)[:8] if group_id else 'None'}... "
+                f"msg_type={data.get('msg_type')}"
+            )
+
             # ── Private messages: not supported (E2E encryption) ──
             if not group_id and from_id and from_id != self._user_id:
                 logger.info(
@@ -390,15 +405,26 @@ class PaperPhoneAdapter(Platform):
             # ── Group messages: process normally ──
             abm = await self.convert_message(data)
             if abm:
+                logger.info(
+                    f"PaperPhoneAdapter: 创建事件 "
+                    f"message_str='{abm.message_str[:50]}' "
+                    f"group_id={abm.group_id[:8] if abm.group_id else '?'}... "
+                    f"sender={abm.sender.user_id[:8] if abm.sender else '?'}..."
+                )
                 event = PaperPhoneEvent(
                     message_obj=abm,
                     platform_meta=self.meta(),
                     adapter_instance=self,
                 )
                 self.commit_event(event)
-                logger.debug(
+                logger.info(
                     f"PaperPhoneAdapter '{self.metadata.id}': "
-                    f"已提交消息事件到队列。"
+                    f"已提交消息事件到队列 (session={event.unified_msg_origin})。"
+                )
+            else:
+                logger.debug(
+                    f"PaperPhoneAdapter: convert_message 返回 None，"
+                    f"跳过。data_keys={list(data.keys())}"
                 )
         elif msg_type == "typing":
             pass  # Ignore typing indicators
@@ -450,10 +476,12 @@ class PaperPhoneAdapter(Platform):
 
         # Skip messages from self
         if from_id == self._user_id:
+            logger.debug("PaperPhoneAdapter: 跳过自身消息。")
             return None
 
         # Only process group messages
         if not group_id:
+            logger.debug("PaperPhoneAdapter: 非群聊消息，跳过。")
             return None
 
         if not from_id:
@@ -465,8 +493,7 @@ class PaperPhoneAdapter(Platform):
 
         abm = AstrBotMessage()
         abm.message = []
-        abm.message_id = msg_id
-        abm.user_id = from_id
+        abm.message_id = str(msg_id)
         abm.self_id = self._user_id or ""
         abm.raw_message = data
 
@@ -474,8 +501,7 @@ class PaperPhoneAdapter(Platform):
         from_nickname = data.get("from_nickname", "")
         if not from_nickname:
             from_nickname = await self._fetch_user_nickname(from_id)
-        abm.nickname = from_nickname
-        abm.sender = MessageMember(user_id=from_id, nickname=from_nickname)
+        abm.sender = MessageMember(user_id=str(from_id), nickname=from_nickname)
 
         # Extract message content (group messages are unencrypted)
         ciphertext = data.get("ciphertext", "")
@@ -510,6 +536,11 @@ class PaperPhoneAdapter(Platform):
             )
             return None
 
+        logger.debug(
+            f"PaperPhoneAdapter: convert_message 成功 "
+            f"msg_id={msg_id} type={abm.type} "
+            f"message_str='{abm.message_str[:30]}'"
+        )
         return abm
 
     # ── Message Sending ──────────────────────────────────────────────────
@@ -876,7 +907,11 @@ class PaperPhoneAdapter(Platform):
         try:
             # Step 1: Login (or register first if needed)
             try:
-                await self._login()
+                login_result = await self._login()
+                logger.info(
+                    f"PaperPhoneAdapter '{self.metadata.id}': "
+                    f"登录成功，user_id={self._user_id}"
+                )
             except RuntimeError as e:
                 if "401" in str(e) and self.auto_register:
                     logger.info(
@@ -890,16 +925,37 @@ class PaperPhoneAdapter(Platform):
                 else:
                     raise
 
+            if not self._jwt_token:
+                logger.error(
+                    f"PaperPhoneAdapter '{self.metadata.id}': "
+                    "登录后无 JWT token，无法继续。"
+                )
+                return
+
+            if not self._user_id:
+                logger.error(
+                    f"PaperPhoneAdapter '{self.metadata.id}': "
+                    "登录后无 user_id，无法继续。"
+                )
+                return
+
             # Step 2: Upload fresh cryptographic keys
+            logger.info(
+                f"PaperPhoneAdapter '{self.metadata.id}': 步骤2: 上传密钥..."
+            )
             await self._upload_keys()
 
             # Step 3: Connect WebSocket
+            logger.info(
+                f"PaperPhoneAdapter '{self.metadata.id}': 步骤3: 连接 WebSocket..."
+            )
             await self._ws_connect()
 
             # Step 4: Message loop
             logger.info(
                 f"PaperPhoneAdapter '{self.metadata.id}': "
-                f"已就绪，Bot 用户: {self.username} ({self._user_id})"
+                f"已就绪 ✓ Bot 用户: {self.username} (id={self._user_id}), "
+                f"平台ID: {self.metadata.id}"
             )
             await self._ws_loop()
 

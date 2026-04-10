@@ -52,32 +52,31 @@ class PaperPhoneEvent(AstrMessageEvent):
             )
 
         # ── Extract session_id ───────────────────────────────────────────
+        # For group messages, use group_id as session_id.
+        # session_id was set in convert_message as abm.session_id = group_id.
+        # group_id is a property backed by the Group object.
         session_id_for_event = "unknown_session"
-        if hasattr(message_obj, "session_id") and message_obj.session_id is not None:
-            session_id_for_event = message_obj.session_id
-        elif hasattr(message_obj, "type"):
-            if (
-                message_obj.type == MessageType.GROUP_MESSAGE
-                and hasattr(message_obj, "group_id")
-                and message_obj.group_id
-            ):
-                session_id_for_event = message_obj.group_id
-            elif (
-                message_obj.type == MessageType.FRIEND_MESSAGE
-                and hasattr(message_obj, "user_id")
-                and message_obj.user_id
-            ):
-                session_id_for_event = message_obj.user_id
-            elif hasattr(message_obj, "user_id") and message_obj.user_id:
-                session_id_for_event = message_obj.user_id
-            else:
-                logger.warning(
-                    "PaperPhoneEvent: message_obj 中无法提取有效的 session_id"
-                )
+
+        # Primary: use session_id if set on the message object
+        if hasattr(message_obj, "session_id") and message_obj.session_id:
+            session_id_for_event = str(message_obj.session_id)
+        # Fallback: use group_id for group messages
+        elif message_obj.group_id:
+            session_id_for_event = str(message_obj.group_id)
+        # Last fallback: use sender ID
+        elif hasattr(message_obj, "sender") and message_obj.sender:
+            session_id_for_event = str(message_obj.sender.user_id)
         else:
             logger.warning(
-                "PaperPhoneEvent: message_obj 中缺少 type 属性"
+                "PaperPhoneEvent: 无法提取有效的 session_id，使用默认值"
             )
+
+        logger.debug(
+            f"PaperPhoneEvent.__init__: "
+            f"message_str='{message_str_for_event[:50]}' "
+            f"session_id={session_id_for_event[:16]}... "
+            f"platform_id={platform_meta.id}"
+        )
 
         # ── Call parent __init__ ─────────────────────────────────────────
         super().__init__(
@@ -92,15 +91,22 @@ class PaperPhoneEvent(AstrMessageEvent):
     async def send(self, message_chain: MessageChain):
         """Send a reply back through the PaperPhone adapter."""
         logger.info(
-            f"PaperPhoneEvent.send() 被调用，session: {self.session}"
+            f"PaperPhoneEvent.send() 被调用，"
+            f"session={self.unified_msg_origin}"
         )
 
         if hasattr(self, "adapter") and self.adapter:
-            await self.adapter.send_by_session(
-                session=self.session,
-                message_chain=message_chain,
-            )
-            logger.info("PaperPhoneEvent.send(): 消息已发送。")
+            try:
+                await self.adapter.send_by_session(
+                    session=self.session,
+                    message_chain=message_chain,
+                )
+                logger.info("PaperPhoneEvent.send(): 消息已发送。")
+            except Exception as e:
+                logger.error(
+                    f"PaperPhoneEvent.send(): 发送消息失败: {e}",
+                    exc_info=True,
+                )
         else:
             logger.error(
                 "PaperPhoneEvent.send(): 无法发送消息，adapter 实例未设置！"
