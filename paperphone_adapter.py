@@ -957,6 +957,17 @@ class PaperPhoneAdapter(Platform):
                 f"已就绪 ✓ Bot 用户: {self.username} (id={self._user_id}), "
                 f"平台ID: {self.metadata.id}"
             )
+
+            # Diagnostic: check if this adapter is discoverable
+            # by Context.send_message() (which iterates platform_insts)
+            try:
+                from astrbot.core.platform.register import platform_cls_map
+                logger.info(
+                    f"PaperPhoneAdapter 诊断: platform_cls_map keys={list(platform_cls_map.keys())}"
+                )
+            except Exception as e:
+                logger.debug(f"PaperPhoneAdapter 诊断: 无法检查 platform_cls_map: {e}")
+
             await self._ws_loop()
 
         except asyncio.CancelledError:
