@@ -628,6 +628,33 @@ class PaperPhoneAdapter(Platform):
                             file_val.split("?")[0]
                         )[1] or ".png"
                         filename = f"image{ext}"
+                elif file_val.startswith("file://"):
+                    # file:// URI scheme — strip prefix and normalize
+                    local_path = file_val[len("file://"):]
+                    # Handle extra slashes (e.g. file:////tmp/...)
+                    while local_path.startswith("//"):
+                        local_path = local_path[1:]
+                    if os.path.isfile(local_path):
+                        with open(local_path, "rb") as f:
+                            file_bytes = f.read()
+                        ext = os.path.splitext(local_path)[1] or ".png"
+                        filename = os.path.basename(local_path)
+                        ext_map = {
+                            ".png": "image/png",
+                            ".jpg": "image/jpeg",
+                            ".jpeg": "image/jpeg",
+                            ".gif": "image/gif",
+                            ".webp": "image/webp",
+                            ".bmp": "image/bmp",
+                            ".svg": "image/svg+xml",
+                        }
+                        content_type = ext_map.get(ext.lower(), "image/png")
+                    else:
+                        logger.warning(
+                            f"PaperPhoneAdapter: file:// URI 指向的文件不存在: "
+                            f"{local_path}"
+                        )
+                        return None
                 elif os.path.isfile(file_val):
                     # Local file path
                     with open(file_val, "rb") as f:
