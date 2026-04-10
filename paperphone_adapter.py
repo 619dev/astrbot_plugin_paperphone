@@ -2,14 +2,14 @@
 PaperPhone Platform Adapter for AstrBot
 
 Connects AstrBot to a PaperPhone server as a regular user account.
-Handles login/registration, WebSocket messaging, and E2E encryption/decryption.
+Handles login/registration, WebSocket messaging for unencrypted group chats.
 """
 
 import asyncio
 import base64
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import aiohttp
 
@@ -26,7 +26,7 @@ from astrbot.api.message_components import Plain, Image
 from astrbot.core.platform.astr_message_event import MessageSesion
 from astrbot import logger
 
-from .paperphone_crypto import PaperPhoneCrypto, b64encode
+
 from .paperphone_event import PaperPhoneEvent
 
 DEFAULT_CONFIG_TMPL = {
@@ -37,9 +37,40 @@ DEFAULT_CONFIG_TMPL = {
     "bot_nickname": "AstrBot",
 }
 
+CONFIG_METADATA = {
+    "server_url": {
+        "description": "PaperPhone 服务器地址",
+        "hint": "例如 http://localhost:3000 或 https://paperphone.example.com",
+        "type": "string",
+    },
+    "username": {
+        "description": "Bot 用户名",
+        "hint": "用于登录 PaperPhone 的用户名，开启自动注册时如果不存在会自动创建",
+        "type": "string",
+    },
+    "password": {
+        "description": "Bot 密码",
+        "hint": "用于登录 PaperPhone 的密码",
+        "type": "string",
+    },
+    "auto_register": {
+        "description": "自动注册",
+        "hint": "登录失败时自动注册新账户",
+        "type": "bool",
+    },
+    "bot_nickname": {
+        "description": "Bot 昵称",
+        "hint": "自动注册时使用的昵称",
+        "type": "string",
+    },
+}
+
 
 @register_platform_adapter(
-    "paperphone", "PaperPhone 适配器", default_config_tmpl=DEFAULT_CONFIG_TMPL
+    "paperphone",
+    "PaperPhone 适配器",
+    default_config_tmpl=DEFAULT_CONFIG_TMPL,
+    config_metadata=CONFIG_METADATA,
 )
 class PaperPhoneAdapter(Platform):
     """
@@ -85,9 +116,6 @@ class PaperPhoneAdapter(Platform):
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._stop_event = asyncio.Event()
-        self._crypto = PaperPhoneCrypto()
-        self._ik_pub_cache: Dict[str, str] = {}  # user_id -> ik_pub (base64)
-        self._dm_notified_users: set = set()  # users already notified about DM limitation
 
         if not self.server_url:
             logger.error(
@@ -143,30 +171,41 @@ class PaperPhoneAdapter(Platform):
 
     # ── Auth: Register & Login ───────────────────────────────────────────
 
+    @staticmethod
+    def _random_b64(n: int = 32) -> str:
+        """Generate a random base64 string of n random bytes."""
+        return base64.b64encode(os.urandom(n)).decode("ascii")
+
+    def _generate_placeholder_keys(self) -> dict:
+        """
+        Generate placeholder cryptographic keys for the PaperPhone server.
+
+        The server requires key upload during registration and login,
+        but the bot only operates in unencrypted group chats,
+        so these keys are never actually used for encryption.
+        """
+        return {
+            "ik_pub": self._random_b64(32),
+            "spk_pub": self._random_b64(32),
+            "spk_sig": self._random_b64(64),
+            "kem_pub": self._random_b64(32),
+            "prekeys": [
+                {"key_id": i, "opk_pub": self._random_b64(32)}
+                for i in range(10)
+            ],
+        }
+
     async def _register(self) -> dict:
         """
         Register a new PaperPhone account for the bot.
 
-        Generates all required cryptographic keys (IK, SPK, OPK, KEM)
-        and uploads them during registration.
+        Submits placeholder cryptographic keys required by the server.
         """
         logger.info(
             f"PaperPhoneAdapter '{self.metadata.id}': 注册新账户 '{self.username}'..."
         )
 
-        # Generate identity keypair
-        ik_pub_b64, _ik_priv_b64 = self._crypto.generate_identity_keypair()
-
-        # Generate signed pre-key
-        spk_pub_b64, _spk_priv_b64, spk_sig_b64 = (
-            self._crypto.generate_signed_prekey()
-        )
-
-        # Generate one-time pre-keys
-        prekeys = self._crypto.generate_one_time_prekeys(10)
-
-        # Generate KEM public key
-        kem_pub_b64 = self._crypto.generate_kem_keypair()
+        keys = self._generate_placeholder_keys()
 
         result = await self._api_request(
             "POST",
@@ -175,11 +214,7 @@ class PaperPhoneAdapter(Platform):
                 "username": self.username,
                 "password": self.password,
                 "nickname": self.bot_nickname,
-                "ik_pub": ik_pub_b64,
-                "spk_pub": spk_pub_b64,
-                "spk_sig": spk_sig_b64,
-                "kem_pub": kem_pub_b64,
-                "prekeys": prekeys,
+                **keys,
             },
             auth=False,
         )
@@ -225,33 +260,21 @@ class PaperPhoneAdapter(Platform):
 
     async def _upload_keys(self):
         """
-        Upload fresh cryptographic keys after login.
+        Upload placeholder cryptographic keys after login.
 
         PaperPhone requires key upload for new device sessions.
-        The bot generates new keys each time it starts.
+        The keys are never used since the bot only handles group chats.
         """
         logger.info(
-            f"PaperPhoneAdapter '{self.metadata.id}': 上传加密密钥..."
+            f"PaperPhoneAdapter '{self.metadata.id}': 上传占位密钥..."
         )
 
-        # Generate fresh keys
-        ik_pub_b64, _ik_priv_b64 = self._crypto.generate_identity_keypair()
-        spk_pub_b64, _spk_priv_b64, spk_sig_b64 = (
-            self._crypto.generate_signed_prekey()
-        )
-        prekeys = self._crypto.generate_one_time_prekeys(10)
-        kem_pub_b64 = self._crypto.generate_kem_keypair()
+        keys = self._generate_placeholder_keys()
 
         await self._api_request(
             "PUT",
             "/api/users/keys",
-            json_data={
-                "ik_pub": ik_pub_b64,
-                "spk_pub": spk_pub_b64,
-                "spk_sig": spk_sig_b64,
-                "kem_pub": kem_pub_b64,
-                "prekeys": prekeys,
-            },
+            json_data=keys,
         )
 
         logger.info(
@@ -385,21 +408,9 @@ class PaperPhoneAdapter(Platform):
             if not group_id and from_id and from_id != self._user_id:
                 logger.info(
                     f"PaperPhoneAdapter: 收到私聊消息，跳过 "
-                    f"(from={str(from_id)[:8]}...)"
+                    f"(from={str(from_id)[:8]}...) "
+                    "Bot 仅支持群聊消息。"
                 )
-                # Send a one-time notice to the sender
-                if from_id not in self._dm_notified_users:
-                    self._dm_notified_users.add(from_id)
-                    try:
-                        await self._send_private_message(
-                            from_id,
-                            "⚠️ Bot 无法处理端对端加密消息。\n"
-                            "请在群聊中与我交互，Bot 只能运行在不加密的群聊会话中。",
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"PaperPhoneAdapter: 发送私聊提示失败: {e}"
-                        )
                 return
 
             # ── Group messages: process normally ──
@@ -545,32 +556,7 @@ class PaperPhoneAdapter(Platform):
 
     # ── Message Sending ──────────────────────────────────────────────────
 
-    async def _fetch_recipient_ik(self, user_id: str) -> str:
-        """
-        Fetch recipient's identity public key for encryption.
 
-        GET /api/users/:id/ik -> { ik_pub: base64 }
-        """
-        if user_id in self._ik_pub_cache:
-            return self._ik_pub_cache[user_id]
-
-        result = await self._api_request("GET", f"/api/users/{user_id}/ik")
-        ik_pub = result.get("ik_pub", "")
-
-        if ik_pub:
-            self._ik_pub_cache[user_id] = ik_pub
-
-        return ik_pub
-
-    async def _fetch_user_nickname(self, user_id: str) -> str:
-        """Fetch user's nickname via API."""
-        try:
-            result = await self._api_request("GET", f"/api/users/{user_id}/ik")
-            # The /ik endpoint only returns ik_pub; we'd need another endpoint.
-            # For now, use the user_id as a fallback.
-            return f"User_{user_id[:8]}"
-        except Exception:
-            return f"User_{user_id[:8]}"
 
     async def _upload_image(self, image: Image) -> Optional[str]:
         """
@@ -831,39 +817,7 @@ class PaperPhoneAdapter(Platform):
                 f"PaperPhoneAdapter: 发送消息失败: {e}", exc_info=True
             )
 
-    async def _send_private_message(self, to_user_id: str, plaintext: str):
-        """Send an encrypted private message via WebSocket."""
-        # Fetch recipient's public key
-        recipient_ik_pub = await self._fetch_recipient_ik(to_user_id)
-        if not recipient_ik_pub:
-            logger.error(
-                f"PaperPhoneAdapter: 无法获取用户 {to_user_id} 的公钥，"
-                "发送失败。"
-            )
-            return
 
-        # Encrypt for both recipient and self
-        encrypted = self._crypto.encrypt_dual(
-            recipient_ik_pub,
-            self._crypto.ik_public_b64 or "",
-            plaintext,
-        )
-
-        # Send via WebSocket
-        ws_message = {
-            "type": "message",
-            "to": to_user_id,
-            "msg_type": "text",
-            "ciphertext": encrypted["ciphertext"],
-            "header": json.dumps(encrypted["header"]),
-            "self_ciphertext": encrypted["self_ciphertext"],
-            "self_header": json.dumps(encrypted["self_header"]),
-        }
-
-        await self._ws.send_json(ws_message)
-        logger.info(
-            f"PaperPhoneAdapter: 已发送私聊消息到 {to_user_id[:8]}..."
-        )
 
     async def _send_group_message(
         self, group_id: str, content: str, msg_type: str = "text"
@@ -896,7 +850,7 @@ class PaperPhoneAdapter(Platform):
         """
         Main adapter lifecycle:
         1. Login or auto-register
-        2. Upload fresh crypto keys
+        2. Upload placeholder keys (required by server)
         3. Connect WebSocket
         4. Enter message loop
         """
