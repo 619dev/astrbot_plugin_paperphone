@@ -6,8 +6,10 @@ Handles login/registration, WebSocket messaging, and E2E encryption/decryption.
 """
 
 import asyncio
+import base64
 import json
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -539,6 +541,170 @@ class PaperPhoneAdapter(Platform):
         except Exception:
             return f"User_{user_id[:8]}"
 
+    async def _upload_image(self, image: Image) -> Optional[str]:
+        """
+        Upload an image to PaperPhone's /api/upload endpoint.
+
+        Handles Image components with:
+        - url: downloads from the URL first, then uploads
+        - file (local path): reads the file and uploads
+        - file (base64://...): decodes and uploads
+
+        Returns the uploaded image URL on success, or None on failure.
+        """
+        file_bytes: Optional[bytes] = None
+        filename = "image.png"
+        content_type = "image/png"
+
+        try:
+            # ── Case 1: Image has a URL ──
+            if hasattr(image, "url") and image.url:
+                url = image.url
+                logger.debug(
+                    f"PaperPhoneAdapter: 下载图片: {url[:100]}..."
+                )
+                http = await self._get_http_session()
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with http.get(url, timeout=timeout) as resp:
+                    if resp.status >= 400:
+                        logger.error(
+                            f"PaperPhoneAdapter: 下载图片失败: "
+                            f"HTTP {resp.status}"
+                        )
+                        return None
+                    file_bytes = await resp.read()
+                    # Determine filename and content type from URL/response
+                    ct = resp.headers.get("Content-Type", "image/png")
+                    content_type = ct.split(";")[0].strip()
+                    # Extract extension from URL
+                    url_path = url.split("?")[0].split("#")[0]
+                    ext = os.path.splitext(url_path)[1] or ".png"
+                    filename = f"image{ext}"
+
+            # ── Case 2: Image has a file path (base64 encoded) ──
+            elif hasattr(image, "file") and image.file:
+                file_val = image.file
+                if file_val.startswith("base64://"):
+                    b64_data = file_val[len("base64://"):]
+                    file_bytes = base64.b64decode(b64_data)
+                    filename = "image.png"
+                    content_type = "image/png"
+                elif file_val.startswith(("http://", "https://")):
+                    # file field can also be a URL in some cases
+                    logger.debug(
+                        f"PaperPhoneAdapter: 下载图片(file字段): "
+                        f"{file_val[:100]}..."
+                    )
+                    http = await self._get_http_session()
+                    timeout = aiohttp.ClientTimeout(total=30)
+                    async with http.get(file_val, timeout=timeout) as resp:
+                        if resp.status >= 400:
+                            logger.error(
+                                f"PaperPhoneAdapter: 下载图片失败: "
+                                f"HTTP {resp.status}"
+                            )
+                            return None
+                        file_bytes = await resp.read()
+                        ct = resp.headers.get("Content-Type", "image/png")
+                        content_type = ct.split(";")[0].strip()
+                        ext = os.path.splitext(
+                            file_val.split("?")[0]
+                        )[1] or ".png"
+                        filename = f"image{ext}"
+                elif os.path.isfile(file_val):
+                    # Local file path
+                    with open(file_val, "rb") as f:
+                        file_bytes = f.read()
+                    ext = os.path.splitext(file_val)[1] or ".png"
+                    filename = os.path.basename(file_val)
+                    # Guess content type from extension
+                    ext_map = {
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".gif": "image/gif",
+                        ".webp": "image/webp",
+                        ".bmp": "image/bmp",
+                        ".svg": "image/svg+xml",
+                    }
+                    content_type = ext_map.get(ext.lower(), "image/png")
+                else:
+                    logger.warning(
+                        f"PaperPhoneAdapter: 无法识别的图片 file 值: "
+                        f"{file_val[:100]}"
+                    )
+                    return None
+            # ── Case 3: Image has path attribute ──
+            elif hasattr(image, "path") and image.path:
+                path_val = image.path
+                if os.path.isfile(path_val):
+                    with open(path_val, "rb") as f:
+                        file_bytes = f.read()
+                    ext = os.path.splitext(path_val)[1] or ".png"
+                    filename = os.path.basename(path_val)
+                    ext_map = {
+                        ".png": "image/png",
+                        ".jpg": "image/jpeg",
+                        ".jpeg": "image/jpeg",
+                        ".gif": "image/gif",
+                        ".webp": "image/webp",
+                    }
+                    content_type = ext_map.get(ext.lower(), "image/png")
+                else:
+                    logger.warning(
+                        f"PaperPhoneAdapter: 图片路径不存在: {path_val}"
+                    )
+                    return None
+            else:
+                logger.warning(
+                    "PaperPhoneAdapter: Image 组件无 url/file/path 属性，"
+                    "无法上传。"
+                )
+                return None
+
+            if not file_bytes:
+                logger.warning("PaperPhoneAdapter: 图片数据为空。")
+                return None
+
+            # ── Upload to PaperPhone server ──
+            upload_url = f"{self.server_url}/api/upload"
+            headers = {}
+            if self._jwt_token:
+                headers["Authorization"] = f"Bearer {self._jwt_token}"
+
+            data = aiohttp.FormData()
+            data.add_field(
+                "file",
+                file_bytes,
+                filename=filename,
+                content_type=content_type,
+            )
+
+            http = await self._get_http_session()
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with http.post(
+                upload_url, data=data, headers=headers, timeout=timeout
+            ) as resp:
+                if resp.status >= 400:
+                    resp_text = await resp.text()
+                    logger.error(
+                        f"PaperPhoneAdapter: 上传图片失败: "
+                        f"HTTP {resp.status}: {resp_text[:200]}"
+                    )
+                    return None
+                result = await resp.json()
+                uploaded_url = result.get("url", "")
+                logger.info(
+                    f"PaperPhoneAdapter: 图片上传成功: {uploaded_url}"
+                )
+                return uploaded_url
+
+        except Exception as e:
+            logger.error(
+                f"PaperPhoneAdapter: 上传图片异常: {e}", exc_info=True
+            )
+            return None
+
     async def send_by_session(
         self, session: MessageSesion, message_chain: MessageChain
     ):
@@ -547,6 +713,10 @@ class PaperPhoneAdapter(Platform):
 
         Only supports group messages. Private messages are not supported
         because the bot cannot handle E2E encryption reliably.
+
+        Handles mixed text+image messages by splitting them into separate
+        WebSocket sends: text parts as msg_type="text", images as
+        msg_type="image" (after uploading to the server).
         """
         if self._ws is None or self._ws.closed:
             logger.error(
@@ -580,29 +750,46 @@ class PaperPhoneAdapter(Platform):
             )
             return
 
-        # Build plaintext from components
-        text_parts = []
+        # Build a list of (msg_type, content) segments to send.
+        # Text parts are batched together; each Image becomes a separate send.
+        segments: List[Tuple[str, str]] = []
+        text_buffer: List[str] = []
+
         for component in components_to_send:
             if isinstance(component, Plain):
-                text_parts.append(component.text)
+                text_buffer.append(component.text)
             elif isinstance(component, Image):
-                if component.url:
-                    text_parts.append(component.url)
-                elif component.file and component.file.startswith("base64://"):
-                    text_parts.append("[图片]")
+                # Flush accumulated text before the image
+                if text_buffer:
+                    segments.append(("text", "\n".join(text_buffer)))
+                    text_buffer = []
+                # Upload the image and get its URL
+                uploaded_url = await self._upload_image(component)
+                if uploaded_url:
+                    segments.append(("image", uploaded_url))
                 else:
-                    text_parts.append("[图片]")
+                    logger.warning(
+                        "PaperPhoneAdapter: 图片上传失败，跳过该图片。"
+                    )
             else:
-                text_parts.append(str(component))
+                text_buffer.append(str(component))
 
-        plaintext = "\n".join(text_parts)
-        if not plaintext.strip():
+        # Flush remaining text
+        if text_buffer:
+            segments.append(("text", "\n".join(text_buffer)))
+
+        if not segments:
             logger.debug("PaperPhoneAdapter: 空消息，跳过发送。")
             return
 
         try:
             if session.message_type == MessageType.GROUP_MESSAGE:
-                await self._send_group_message(session.session_id, plaintext)
+                for msg_type, content in segments:
+                    if not content.strip():
+                        continue
+                    await self._send_group_message(
+                        session.session_id, content, msg_type=msg_type
+                    )
             else:
                 logger.warning(
                     f"PaperPhoneAdapter: 不支持的消息类型: "
@@ -647,23 +834,29 @@ class PaperPhoneAdapter(Platform):
             f"PaperPhoneAdapter: 已发送私聊消息到 {to_user_id[:8]}..."
         )
 
-    async def _send_group_message(self, group_id: str, plaintext: str):
-        """Send a message to a group via WebSocket."""
-        # For group messages, PaperPhone sends the ciphertext field directly
-        # Groups may use a group-level key or per-member encryption
-        # For now, we send as plaintext in the ciphertext field
-        # (matching PaperPhone's group message behavior)
+    async def _send_group_message(
+        self, group_id: str, content: str, msg_type: str = "text"
+    ):
+        """
+        Send a message to a group via WebSocket.
+
+        Args:
+            group_id: Target group ID.
+            content: Message content (plain text or image URL).
+            msg_type: "text" for text messages, "image" for image messages.
+        """
         ws_message = {
             "type": "message",
             "group_id": group_id,
-            "msg_type": "text",
-            "ciphertext": plaintext,
+            "msg_type": msg_type,
+            "ciphertext": content,
             "header": None,
         }
 
         await self._ws.send_json(ws_message)
         logger.info(
-            f"PaperPhoneAdapter: 已发送群聊消息到 group={group_id[:8]}..."
+            f"PaperPhoneAdapter: 已发送群聊消息到 group={group_id[:8]}... "
+            f"(类型={msg_type})"
         )
 
     # ── Main Run & Shutdown ──────────────────────────────────────────────
